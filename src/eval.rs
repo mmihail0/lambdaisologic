@@ -65,11 +65,12 @@ fn subst_branch(
     replacement: &Term,
     rep_fv: &HashSet<String>,
 ) -> (String, Term) {
-    if bound == var {
+    let body_fv = free_vars(body);
+    if bound == var || !body_fv.contains(var) {
         (bound.to_string(), body.clone())
     } else if rep_fv.contains(bound) {
         let mut avoid = rep_fv.clone();
-        avoid.extend(free_vars(body));
+        avoid.extend(body_fv);
         avoid.insert(var.to_string());
         let fresh = fresh_var(bound, &avoid);
         let renamed = subst(body, bound, &Term::Var(fresh.clone()));
