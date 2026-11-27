@@ -18,6 +18,7 @@ pub enum Type {
     Arrow(Box<Type>, Box<Type>),
     Prod(Box<Type>, Box<Type>),
     Sum(Box<Type>, Box<Type>),
+    Cont(Box<Type>),
     Top,
     Bot,
 }
@@ -35,6 +36,10 @@ impl Type {
         Self::Sum(Box::new(left), Box::new(right))
     }
 
+    pub fn cont(inner: Type) -> Self {
+        Self::Cont(Box::new(inner))
+    }
+
     pub fn not(inner: Type) -> Self {
         Self::arrow(inner, Self::Bot)
     }
@@ -44,7 +49,8 @@ impl Type {
             Type::Arrow(_, _) => 0,
             Type::Sum(_, _) => 1,
             Type::Prod(_, _) => 2,
-            Type::Atom(_) | Type::Top | Type::Bot => 3,
+            Type::Cont(_) => 3,
+            Type::Atom(_) | Type::Top | Type::Bot => 4,
         }
     }
 
@@ -72,6 +78,10 @@ impl Type {
                 left.fmt_with_prec(f, 2)?;
                 write!(f, " * ")?;
                 right.fmt_with_prec(f, 3)?;
+            }
+            Type::Cont(inner) => {
+                write!(f, "Cont ")?;
+                inner.fmt_with_prec(f, 4)?;
             }
         }
         if needs_parens {
@@ -111,6 +121,16 @@ pub enum Term {
     Unit,
     Absurd(Box<Term>, Option<Type>),
     Ann(Box<Term>, Type),
+    CallCC {
+        param: String,
+        param_ty: Option<Type>,
+        body: Box<Term>,
+    },
+    Throw {
+        cont: Box<Term>,
+        value: Box<Term>,
+        target_ty: Option<Type>,
+    },
 }
 
 impl Term {
@@ -158,11 +178,32 @@ impl Term {
         Self::Ann(Box::new(inner), ty)
     }
 
+    pub fn callcc(param: impl Into<String>, param_ty: Option<Type>, body: Term) -> Self {
+        Self::CallCC {
+            param: param.into(),
+            param_ty,
+            body: Box::new(body),
+        }
+    }
+
+    pub fn throw(cont: Term, value: Term, target_ty: Option<Type>) -> Self {
+        Self::Throw {
+            cont: Box::new(cont),
+            value: Box::new(value),
+            target_ty,
+        }
+    }
+
     fn precedence(&self) -> u8 {
         match self {
-            Term::Lam { .. } | Term::Case { .. } => 0,
+            Term::Lam { .. } | Term::Case { .. } | Term::CallCC { .. } => 0,
             Term::App(_, _) => 1,
-            Term::Fst(_) | Term::Snd(_) | Term::Inl(_) | Term::Inr(_) | Term::Absurd(_, _) => 2,
+            Term::Fst(_)
+            | Term::Snd(_)
+            | Term::Inl(_)
+            | Term::Inr(_)
+            | Term::Absurd(_, _)
+            | Term::Throw { .. } => 2,
             Term::Var(_) | Term::Pair(_, _) | Term::Unit | Term::Ann(_, _) => 3,
         }
     }
@@ -241,6 +282,30 @@ impl Term {
                 inner.fmt_with_prec(f, 0)?;
                 write!(f, " : {})", ty)?;
             }
+            Term::CallCC {
+                param,
+                param_ty,
+                body,
+            } => {
+                match param_ty {
+                    Some(ty) => write!(f, "callcc ({} : {}). ", param, ty)?,
+                    None => write!(f, "callcc {}. ", param)?,
+                }
+                body.fmt_with_prec(f, 0)?;
+            }
+            Term::Throw {
+                cont,
+                value,
+                target_ty,
+            } => {
+                match target_ty {
+                    Some(ty) => write!(f, "throw[{}] ", ty)?,
+                    None => write!(f, "throw ")?,
+                }
+                cont.fmt_with_prec(f, 3)?;
+                write!(f, " ")?;
+                value.fmt_with_prec(f, 3)?;
+            }
         }
         if needs_parens {
             write!(f, ")")?;
@@ -285,8 +350,16 @@ mod tests {
         let left_arrow = Type::arrow(Type::arrow(a.clone(), b.clone()), c.clone());
         assert_eq!(left_arrow.to_string(), "(A -> B) -> C");
 
-        let mixed = Type::prod(Type::sum(a, b), c);
+        let mixed = Type::prod(Type::sum(a.clone(), b.clone()), c);
         assert_eq!(mixed.to_string(), "(A + B) * C");
+
+        assert_eq!(Type::cont(a.clone()).to_string(), "Cont A");
+        assert_eq!(
+            Type::cont(Type::arrow(a.clone(), b.clone())).to_string(),
+            "Cont (A -> B)"
+        );
+        assert_eq!(Type::cont(Type::cont(a.clone())).to_string(), "Cont (Cont A)");
+        assert_eq!(Type::prod(Type::cont(a), b).to_string(), "Cont A * B");
     }
 
     #[test]
@@ -303,5 +376,18 @@ mod tests {
             Term::inl(Term::var("x")),
         );
         assert_eq!(lam.to_string(), "\\(x : A). inl x");
+
+        let cc = Term::callcc(
+            "k",
+            Some(Type::cont(Type::Atom("A".to_string()))),
+            Term::throw(Term::var("k"), Term::var("x"), None),
+        );
+        assert_eq!(cc.to_string(), "callcc (k : Cont A). throw k x");
+
+        let app_cc = Term::app(
+            Term::var("f"),
+            Term::callcc("k", None, Term::throw(Term::var("k"), Term::Unit, Some(Type::Bot))),
+        );
+        assert_eq!(app_cc.to_string(), "f (callcc k. throw[Bot] k ())");
     }
 }

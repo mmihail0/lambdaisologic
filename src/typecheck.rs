@@ -68,6 +68,10 @@ pub enum TypeError {
         found: Type,
         term: Term,
     },
+    ExpectedContinuation {
+        found: Type,
+        term: Term,
+    },
     BranchTypeMismatch {
         left: Type,
         right: Type,
@@ -120,6 +124,13 @@ impl fmt::Display for TypeError {
             }
             TypeError::ExpectedSum { found, term } => {
                 write!(f, "expected sum type for '{}', found {}", term, found)
+            }
+            TypeError::ExpectedContinuation { found, term } => {
+                write!(
+                    f,
+                    "expected continuation type for '{}', found {}",
+                    term, found
+                )
             }
             TypeError::BranchTypeMismatch { left, right } => write!(
                 f,
@@ -241,6 +252,49 @@ pub fn synthesize(ctx: &Context, term: &Term) -> Result<Type, TypeError> {
             reason: "unannotated absurd requires an expected type".to_string(),
             term: term.clone(),
         }),
+        Term::CallCC {
+            param,
+            param_ty: Some(Type::Cont(a)),
+            body,
+        } => {
+            check(&ctx.extend(param.clone(), Type::cont((**a).clone())), body, a)?;
+            Ok((**a).clone())
+        }
+        Term::CallCC {
+            param_ty: Some(found),
+            ..
+        } => Err(TypeError::ExpectedContinuation {
+            found: found.clone(),
+            term: term.clone(),
+        }),
+        Term::CallCC { param_ty: None, .. } => Err(TypeError::CannotSynthesize {
+            reason: "unannotated callcc requires an expected type or Cont annotation".to_string(),
+            term: term.clone(),
+        }),
+        Term::Throw {
+            cont,
+            value,
+            target_ty,
+        } => {
+            let cont_ty = synthesize(ctx, cont)?;
+            match cont_ty {
+                Type::Cont(a) => {
+                    check(ctx, value, &a)?;
+                    match target_ty {
+                        Some(ty) => Ok(ty.clone()),
+                        None => Err(TypeError::CannotSynthesize {
+                            reason: "unannotated throw requires an expected type or type argument"
+                                .to_string(),
+                            term: term.clone(),
+                        }),
+                    }
+                }
+                found => Err(TypeError::ExpectedContinuation {
+                    found,
+                    term: (**cont).clone(),
+                }),
+            }
+        }
     }
 }
 
@@ -344,6 +398,46 @@ pub fn check(ctx: &Context, term: &Term, expected: &Type) -> Result<(), TypeErro
                 })
             }
         }
+        Term::CallCC {
+            param,
+            param_ty,
+            body,
+        } => {
+            let expected_cont = Type::cont(expected.clone());
+            if let Some(ann) = param_ty {
+                if ann != &expected_cont {
+                    return Err(TypeError::AnnotationMismatch {
+                        param: param.clone(),
+                        expected: expected_cont,
+                        annotated: ann.clone(),
+                    });
+                }
+            }
+            check(&ctx.extend(param.clone(), expected_cont), body, expected)
+        }
+        Term::Throw {
+            cont,
+            value,
+            target_ty,
+        } => {
+            if let Some(ann) = target_ty {
+                if ann != expected {
+                    return Err(TypeError::TypeMismatch {
+                        expected: expected.clone(),
+                        found: ann.clone(),
+                        context: "in throw type annotation".to_string(),
+                    });
+                }
+            }
+            let cont_ty = synthesize(ctx, cont)?;
+            match cont_ty {
+                Type::Cont(a) => check(ctx, value, &a),
+                found => Err(TypeError::ExpectedContinuation {
+                    found,
+                    term: (**cont).clone(),
+                }),
+            }
+        }
         _ => {
             let found = synthesize(ctx, term)?;
             if &found == expected {
@@ -392,11 +486,36 @@ mod tests {
     }
 
     #[test]
+    fn classical_continuation_proofs() {
+        let src = "
+            theorem peirce : ((A -> B) -> A) -> A =
+              \\f. callcc (k : Cont A). f (\\a. throw k a)
+            theorem dne : ((A -> Void) -> Void) -> A =
+              \\dn. callcc k. absurd (dn (\\a. throw k a))
+            theorem lem : Either A (A -> Void) =
+              callcc k. inr (\\a. throw k (inl a))
+            theorem classical_demorgan : ((A * B) -> Void) -> Either (A -> Void) (B -> Void) =
+              \\nab. callcc k. inl (\\a. throw k (inr (\\b. nab (a, b))))
+        ";
+        let decls = parse_program(src).unwrap();
+        let ctx = check_program(&decls).unwrap();
+        assert_eq!(ctx.len(), 4);
+    }
+
+    #[test]
     fn synthesize_annotated_and_app() {
         let term = parse_term("\\(f : A -> B) (x : A). f x").unwrap();
         let ty = synthesize(&Context::new(), &term).unwrap();
         let expected = parse_type("(A -> B) -> A -> B").unwrap();
         assert_eq!(ty, expected);
+
+        let cc = parse_term("callcc (k : Cont A). throw k a").unwrap();
+        let ctx = Context::new().extend("a", Type::Atom("A".into()));
+        assert_eq!(synthesize(&ctx, &cc).unwrap(), Type::Atom("A".into()));
+
+        let th = parse_term("throw[B] k a").unwrap();
+        let ctx2 = ctx.extend("k", Type::cont(Type::Atom("A".into())));
+        assert_eq!(synthesize(&ctx2, &th).unwrap(), Type::Atom("B".into()));
     }
 
     #[test]
@@ -443,5 +562,41 @@ mod tests {
         let unbound = parse_term("missing").unwrap();
         let err = synthesize(&Context::new(), &unbound).unwrap_err();
         assert!(matches!(err, TypeError::UnboundVariable { .. }));
+    }
+
+    #[test]
+    fn continuation_type_errors() {
+        let bad_cc_ann = parse_term("callcc (k : Cont B). throw k a").unwrap();
+        let err = check(
+            &Context::new().extend("a", Type::Atom("A".into())),
+            &bad_cc_ann,
+            &Type::Atom("A".into()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, TypeError::AnnotationMismatch { .. }));
+
+        let bad_cc_non_cont = parse_term("callcc (k : A). k").unwrap();
+        let err2 = synthesize(&Context::new(), &bad_cc_non_cont).unwrap_err();
+        assert!(matches!(err2, TypeError::ExpectedContinuation { .. }));
+
+        let bad_throw_target = parse_term("\\(x : A). throw x x").unwrap();
+        let err3 = check(
+            &Context::new(),
+            &bad_throw_target,
+            &parse_type("A -> B").unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(err3, TypeError::ExpectedContinuation { .. }));
+
+        let bad_throw_payload = parse_term("callcc k. throw k ()").unwrap();
+        let err4 = check(&Context::new(), &bad_throw_payload, &Type::Atom("A".into())).unwrap_err();
+        assert!(matches!(
+            err4,
+            TypeError::TypeMismatch {
+                expected,
+                found: Type::Top,
+                ..
+            } if expected == Type::Atom("A".into())
+        ));
     }
 }

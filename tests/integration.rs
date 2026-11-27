@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use curry_howard::eval::{normalize, normalize_with_env, subst};
+use curry_howard::eval::{normalize, normalize_with_env};
 use curry_howard::parser::{parse_program, parse_term, parse_type};
 use curry_howard::search::{prove, DEFAULT_SEARCH_DEPTH};
 use curry_howard::syntax::{Term, Type};
@@ -156,9 +156,9 @@ fn evaluator_normalization_and_capture_avoidance() {
     assert_eq!(norm.to_string(), "\\f. \\a. \\b. f a b");
     check(&Context::new(), &norm, &check_ty).unwrap();
 
-    let case_capture = parse_term("case s of inl x => y | inr x => x").unwrap();
-    let replaced = subst(&case_capture, "y", &Term::var("x"));
-    let expected = parse_term("case s of inl x1 => x | inr x => x").unwrap();
+    let case_capture = parse_term("(\\y. case s of inl x => y | inr x => x) x").unwrap();
+    let replaced = normalize(&case_capture);
+    let expected = parse_term("case s of inl x1 => x | inr x2 => x2").unwrap();
     assert_eq!(replaced, expected);
 
     let absurd_ty = Type::arrow(Type::Bot, Type::Atom("A".into()));

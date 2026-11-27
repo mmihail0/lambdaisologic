@@ -48,6 +48,10 @@ enum TokenKind {
     Not,
     Top,
     Bot,
+    Cont,
+    Either,
+    CallCC,
+    Throw,
     Lambda,
     Dot,
     Colon,
@@ -58,6 +62,8 @@ enum TokenKind {
     RParen,
     LBracket,
     RBracket,
+    LAngle,
+    RAngle,
     Arrow,
     FatArrow,
     Star,
@@ -87,6 +93,10 @@ impl TokenKind {
             TokenKind::Not => "'not'".to_string(),
             TokenKind::Top => "'Top'".to_string(),
             TokenKind::Bot => "'Bot'".to_string(),
+            TokenKind::Cont => "'Cont'".to_string(),
+            TokenKind::Either => "'Either'".to_string(),
+            TokenKind::CallCC => "'callcc'".to_string(),
+            TokenKind::Throw => "'throw'".to_string(),
             TokenKind::Lambda => "'\\'".to_string(),
             TokenKind::Dot => "'.'".to_string(),
             TokenKind::Colon => "':'".to_string(),
@@ -97,6 +107,8 @@ impl TokenKind {
             TokenKind::RParen => "')'".to_string(),
             TokenKind::LBracket => "'['".to_string(),
             TokenKind::RBracket => "']'".to_string(),
+            TokenKind::LAngle => "'<'".to_string(),
+            TokenKind::RAngle => "'>'".to_string(),
             TokenKind::Arrow => "'->'".to_string(),
             TokenKind::FatArrow => "'=>'".to_string(),
             TokenKind::Star => "'*'".to_string(),
@@ -139,6 +151,10 @@ impl Lexer {
 
     fn peek_next(&self) -> Option<char> {
         self.chars.get(self.pos + 1).copied()
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<char> {
+        self.chars.get(self.pos + offset).copied()
     }
 
     fn span(&self) -> Span {
@@ -213,10 +229,14 @@ impl Lexer {
         }
     }
 
+    fn is_ident_continue(ch: char) -> bool {
+        ch.is_ascii_alphanumeric() || ch == '_' || ch == '\''
+    }
+
     fn read_ident(&mut self) -> String {
         let mut s = String::new();
         while let Some(ch) = self.peek() {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '\'' {
+            if Self::is_ident_continue(ch) {
                 s.push(ch);
                 self.advance();
             } else {
@@ -240,22 +260,38 @@ impl Lexer {
             };
             let kind = if ch.is_ascii_alphabetic() || ch == '_' {
                 let word = self.read_ident();
-                match word.as_str() {
-                    "theorem" => TokenKind::Theorem,
-                    "lemma" => TokenKind::Lemma,
-                    "fn" => TokenKind::Fn,
-                    "fst" => TokenKind::Fst,
-                    "snd" => TokenKind::Snd,
-                    "inl" => TokenKind::Inl,
-                    "inr" => TokenKind::Inr,
-                    "case" => TokenKind::Case,
-                    "of" => TokenKind::Of,
-                    "absurd" => TokenKind::Absurd,
-                    "unit" => TokenKind::UnitKw,
-                    "not" => TokenKind::Not,
-                    "Top" | "Unit" | "True" => TokenKind::Top,
-                    "Bot" | "Void" | "False" => TokenKind::Bot,
-                    _ => TokenKind::Ident(word),
+                if word == "call"
+                    && self.peek() == Some('/')
+                    && self.peek_at(1) == Some('c')
+                    && self.peek_at(2) == Some('c')
+                    && !self.peek_at(3).map_or(false, Self::is_ident_continue)
+                {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    TokenKind::CallCC
+                } else {
+                    match word.as_str() {
+                        "theorem" => TokenKind::Theorem,
+                        "lemma" => TokenKind::Lemma,
+                        "fn" => TokenKind::Fn,
+                        "fst" => TokenKind::Fst,
+                        "snd" => TokenKind::Snd,
+                        "inl" => TokenKind::Inl,
+                        "inr" => TokenKind::Inr,
+                        "case" => TokenKind::Case,
+                        "of" => TokenKind::Of,
+                        "absurd" => TokenKind::Absurd,
+                        "unit" => TokenKind::UnitKw,
+                        "not" => TokenKind::Not,
+                        "Top" | "Unit" | "True" => TokenKind::Top,
+                        "Bot" | "Void" | "False" => TokenKind::Bot,
+                        "Cont" => TokenKind::Cont,
+                        "Either" => TokenKind::Either,
+                        "callcc" => TokenKind::CallCC,
+                        "throw" => TokenKind::Throw,
+                        _ => TokenKind::Ident(word),
+                    }
                 }
             } else {
                 match ch {
@@ -334,6 +370,14 @@ impl Lexer {
                     ']' => {
                         self.advance();
                         TokenKind::RBracket
+                    }
+                    '<' => {
+                        self.advance();
+                        TokenKind::LAngle
+                    }
+                    '>' => {
+                        self.advance();
+                        TokenKind::RAngle
                     }
                     '*' => {
                         self.advance();
@@ -465,6 +509,28 @@ impl Parser {
         if self.eat(&TokenKind::Tilde) || self.eat(&TokenKind::Not) {
             let inner = self.parse_unary_ty()?;
             Ok(Type::not(inner))
+        } else if self.eat(&TokenKind::Cont) {
+            let inner = if self.eat(&TokenKind::LAngle) {
+                let t = self.parse_type_expr()?;
+                self.expect(TokenKind::RAngle)?;
+                t
+            } else {
+                self.parse_atom_ty()?
+            };
+            Ok(Type::cont(inner))
+        } else if self.eat(&TokenKind::Either) {
+            let (left, right) = if self.eat(&TokenKind::LAngle) {
+                let l = self.parse_type_expr()?;
+                self.expect(TokenKind::Comma)?;
+                let r = self.parse_type_expr()?;
+                self.expect(TokenKind::RAngle)?;
+                (l, r)
+            } else {
+                let l = self.parse_atom_ty()?;
+                let r = self.parse_atom_ty()?;
+                (l, r)
+            };
+            Ok(Type::sum(left, right))
         } else {
             self.parse_atom_ty()
         }
@@ -538,6 +604,18 @@ impl Parser {
             return Ok(body);
         }
 
+        if self.eat(&TokenKind::CallCC) {
+            if !self.starts_binder() {
+                return Err(self.error_here("expected continuation variable after 'callcc'"));
+            }
+            let (param, param_ty) = self.parse_binder()?;
+            if !self.eat(&TokenKind::Dot) && !self.eat(&TokenKind::FatArrow) {
+                return Err(self.error_here("expected '.' or '=>' after callcc binding"));
+            }
+            let body = self.parse_term_expr()?;
+            return Ok(Term::callcc(param, param_ty, body));
+        }
+
         if self.eat(&TokenKind::Case) {
             let scrutinee = self.parse_term_expr()?;
             self.expect(TokenKind::Of)?;
@@ -606,6 +684,18 @@ impl Parser {
             };
             let inner = self.parse_atom_term()?;
             return Ok(Term::absurd(inner, ty));
+        }
+        if self.eat(&TokenKind::Throw) {
+            let target_ty = if self.eat(&TokenKind::LBracket) {
+                let t = self.parse_type_expr()?;
+                self.expect(TokenKind::RBracket)?;
+                Some(t)
+            } else {
+                None
+            };
+            let cont = self.parse_atom_term()?;
+            let value = self.parse_atom_term()?;
+            return Ok(Term::throw(cont, value, target_ty));
         }
         self.parse_atom_term()
     }
@@ -727,6 +817,30 @@ mod tests {
     }
 
     #[test]
+    fn continuation_and_either_types() {
+        let c1 = parse_type("Cont A").unwrap();
+        let c2 = parse_type("Cont<A -> B>").unwrap();
+        let e1 = parse_type("Either A (A -> Void)").unwrap();
+        let e2 = parse_type("Either<A, B>").unwrap();
+
+        assert_eq!(c1, Type::cont(Type::Atom("A".into())));
+        assert_eq!(
+            c2,
+            Type::cont(Type::arrow(Type::Atom("A".into()), Type::Atom("B".into())))
+        );
+        assert_eq!(
+            e1,
+            Type::sum(Type::Atom("A".into()), Type::not(Type::Atom("A".into())))
+        );
+        assert_eq!(
+            e2,
+            Type::sum(Type::Atom("A".into()), Type::Atom("B".into()))
+        );
+        assert_eq!(parse_type(&c2.to_string()).unwrap(), c2);
+        assert_eq!(parse_type(&e1.to_string()).unwrap(), e1);
+    }
+
+    #[test]
     fn term_application_and_lambdas() {
         let t = parse_term("\\(f : A -> B) x. f x").unwrap();
         let expected = Term::lam(
@@ -753,6 +867,22 @@ mod tests {
     }
 
     #[test]
+    fn callcc_and_throw_terms() {
+        let t1 = parse_term("callcc k. f (\\x. throw k x)").unwrap();
+        let t2 = parse_term("call/cc (k : Cont A) => throw[Bot] k a").unwrap();
+        assert_eq!(parse_term(&t1.to_string()).unwrap(), t1);
+        assert_eq!(parse_term(&t2.to_string()).unwrap(), t2);
+        assert_eq!(
+            t2,
+            Term::callcc(
+                "k",
+                Some(Type::cont(Type::Atom("A".into()))),
+                Term::throw(Term::var("k"), Term::var("a"), Some(Type::Bot)),
+            )
+        );
+    }
+
+    #[test]
     fn program_with_comments_and_multiline() {
         let src = "-- line comment\ntheorem mp : A -> (A -> B) -> B =\n  \\a f. f a\n\nlemma unit_id : Top -> Top =\n  \\u. ()\n";
         let decls = parse_program(src).unwrap();
@@ -771,5 +901,17 @@ mod tests {
         let err2 = parse_program("theorem t : A -> A = \\x.\n  (x").unwrap_err();
         assert_eq!(err2.line, 2);
         assert_eq!(err2.col, 5);
+
+        let err_cc = parse_term("callcc . x").unwrap_err();
+        assert_eq!(err_cc.line, 1);
+        assert_eq!(err_cc.col, 8);
+
+        let err_throw = parse_term("throw k").unwrap_err();
+        assert_eq!(err_throw.line, 1);
+        assert_eq!(err_throw.col, 8);
+
+        let err_cont = parse_type("Cont<A").unwrap_err();
+        assert_eq!(err_cont.line, 1);
+        assert_eq!(err_cont.col, 7);
     }
 }

@@ -41,6 +41,18 @@ fn strip_lam_annotations(term: &Term) -> Term {
         },
         Term::Absurd(e, ty) => Term::absurd(strip_lam_annotations(e), ty.clone()),
         Term::Ann(e, ty) => Term::ann(strip_lam_annotations(e), ty.clone()),
+        Term::CallCC { param, body, .. } => {
+            Term::callcc(param.clone(), None, strip_lam_annotations(body))
+        }
+        Term::Throw {
+            cont,
+            value,
+            target_ty,
+        } => Term::throw(
+            strip_lam_annotations(cont),
+            strip_lam_annotations(value),
+            target_ty.clone(),
+        ),
     }
 }
 
