@@ -4,13 +4,13 @@ use std::process;
 
 use curry_howard::eval::normalize_with_env;
 use curry_howard::parser::{parse_program, parse_type};
-use curry_howard::search::{prove, DEFAULT_SEARCH_DEPTH};
+use curry_howard::search::{prove_with_mode, LogicMode, DEFAULT_SEARCH_DEPTH};
 use curry_howard::syntax::Term;
 use curry_howard::typecheck::{check_declaration, Context};
 
 fn usage() -> String {
     format!(
-        "usage:\n  curry-howard check <file.ch>\n  curry-howard prove <proposition> [--depth <n>]\n\noptions:\n  --check <file.ch>      verify theorems in a source file\n  --prove <proposition>  search for an intuitionistic proof term\n  -d, --depth <n>        maximum proof search depth (default: {})\n  -h, --help             show this help message",
+        "usage:\n  curry-howard check <file.ch>\n  curry-howard prove <proposition> [--classical] [--depth <n>]\n\noptions:\n  --check <file.ch>      verify theorems in a source file\n  --prove <proposition>  search for a proof term\n  -c, --classical        enable classical proof search (callcc/throw)\n  -i, --intuitionistic   use intuitionistic proof search (default)\n  -d, --depth <n>        maximum proof search depth (default: {})\n  -h, --help             show this help message",
         DEFAULT_SEARCH_DEPTH
     )
 }
@@ -67,7 +67,14 @@ fn run_check(path: &str) -> i32 {
     }
 }
 
-fn run_prove(prop_str: &str, depth: usize) -> i32 {
+fn mode_label(mode: LogicMode) -> &'static str {
+    match mode {
+        LogicMode::Intuitionistic => "intuitionistic",
+        LogicMode::Classical => "classical",
+    }
+}
+
+fn run_prove(prop_str: &str, depth: usize, mode: LogicMode) -> i32 {
     let ty = match parse_type(prop_str) {
         Ok(t) => t,
         Err(err) => {
@@ -76,29 +83,37 @@ fn run_prove(prop_str: &str, depth: usize) -> i32 {
         }
     };
 
-    match prove(&ty, depth) {
+    let label = mode_label(mode);
+    match prove_with_mode(&ty, depth, mode) {
         Some(proof) => {
-            println!("[PROVED] {}", ty);
+            println!("[PROVED] ({}) {}", label, ty);
             println!("  proof: {}", proof);
             0
         }
         None => {
             eprintln!(
-                "[UNPROVABLE] no intuitionistic proof found for {} within depth {}",
-                ty, depth
+                "[UNPROVABLE] no {} proof found for {} within depth {}",
+                label, ty, depth
             );
             1
         }
     }
 }
 
-fn parse_prove_args(args: &[String]) -> Result<(String, usize), String> {
+fn parse_prove_args(args: &[String]) -> Result<(String, usize, LogicMode), String> {
     let mut depth = DEFAULT_SEARCH_DEPTH;
+    let mut mode = LogicMode::Intuitionistic;
     let mut prop: Option<String> = None;
     let mut i = 0;
 
     while i < args.len() {
         match args[i].as_str() {
+            "--classical" | "-c" => {
+                mode = LogicMode::Classical;
+            }
+            "--intuitionistic" | "-i" => {
+                mode = LogicMode::Intuitionistic;
+            }
             "--depth" | "-d" => {
                 i += 1;
                 if i >= args.len() {
@@ -125,7 +140,7 @@ fn parse_prove_args(args: &[String]) -> Result<(String, usize), String> {
     }
 
     let proposition = prop.ok_or_else(|| "missing proposition for prove".to_string())?;
-    Ok((proposition, depth))
+    Ok((proposition, depth, mode))
 }
 
 fn run(args: &[String]) -> i32 {
@@ -147,7 +162,7 @@ fn run(args: &[String]) -> i32 {
             run_check(&args[1])
         }
         "prove" | "--prove" => match parse_prove_args(&args[1..]) {
-            Ok((prop, depth)) => run_prove(&prop, depth),
+            Ok((prop, depth, mode)) => run_prove(&prop, depth, mode),
             Err(msg) => {
                 eprintln!("{}\n{}", msg, usage());
                 1
